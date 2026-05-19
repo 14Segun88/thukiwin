@@ -238,6 +238,16 @@ interface AskBarViewProps {
    * "normal" = violet ring; "max" = red ring + label; undefined = no ring.
    */
   isDragOver?: 'normal' | 'max';
+  /**
+   * Mic button props. When omitted, the mic button is hidden — which is
+   * what tests expect by default. The host wires these to a `useAsr()`
+   * instance and appends the transcript to `query`.
+   */
+  onMicStart?: () => void | Promise<void>;
+  onMicStop?: () => Promise<string>;
+  onMicCancel?: () => void;
+  micState?: 'idle' | 'requesting' | 'recording' | 'transcribing' | 'error';
+  micError?: string | null;
 }
 
 /**
@@ -264,6 +274,11 @@ export function AskBarView({
   onImagePreview,
   onScreenshot,
   isDragOver,
+  onMicStart,
+  onMicStop,
+  onMicCancel,
+  micState = 'idle',
+  micError,
 }: AskBarViewProps) {
   /** Ref to the mirror div behind the textarea for command highlighting. */
   const mirrorRef = useRef<HTMLDivElement>(null);
@@ -671,6 +686,83 @@ export function AskBarView({
               </button>
             </Tooltip>
           )}
+
+          {/* Microphone (push-to-talk Whisper) — only rendered if the host
+              wired in the mic handlers. Click to start, click again to stop
+              and transcribe; the transcript is appended to the input. */}
+          {onMicStart && onMicStop ? (
+            <Tooltip
+              label={
+                micState === 'recording'
+                  ? 'Stop and transcribe'
+                  : micState === 'transcribing'
+                    ? 'Transcribing…'
+                    : micError
+                      ? `Mic error: ${micError}`
+                      : 'Hold to speak (Whisper via Groq)'
+              }
+            >
+              <button
+                type="button"
+                onClick={async () => {
+                  if (micState === 'recording') {
+                    try {
+                      const text = await onMicStop();
+                      if (text) {
+                        setQuery((prev) =>
+                          prev.trim().length > 0 ? prev + ' ' + text : text,
+                        );
+                      }
+                    } catch {
+                      // error surfaced via micError; nothing to do here
+                    }
+                  } else if (
+                    micState === 'transcribing' ||
+                    micState === 'requesting'
+                  ) {
+                    onMicCancel?.();
+                  } else {
+                    try {
+                      await onMicStart();
+                    } catch {
+                      // error surfaced via micError
+                    }
+                  }
+                }}
+                disabled={isBusy && micState === 'idle'}
+                aria-label={
+                  micState === 'recording' ? 'Stop recording' : 'Start recording'
+                }
+                aria-pressed={micState === 'recording'}
+                className={`shrink-0 w-7 h-7 flex items-center justify-center rounded-lg transition-colors duration-150 cursor-pointer ${
+                  micState === 'recording'
+                    ? 'bg-red-500/20 text-red-400 animate-pulse'
+                    : micState === 'transcribing'
+                      ? 'bg-amber-500/15 text-amber-400'
+                      : micError
+                        ? 'text-red-400 hover:bg-white/8'
+                        : 'text-text-secondary hover:text-text-primary hover:bg-white/8'
+                }`}
+              >
+                <svg
+                  width="14"
+                  height="14"
+                  viewBox="0 0 20 20"
+                  fill="none"
+                  xmlns="http://www.w3.org/2000/svg"
+                >
+                  <path
+                    d="M10 2a3 3 0 00-3 3v5a3 3 0 006 0V5a3 3 0 00-3-3z"
+                    fill="currentColor"
+                  />
+                  <path
+                    d="M4 9a1 1 0 112 0 4 4 0 008 0 1 1 0 112 0 6 6 0 01-5 5.917V17h2a1 1 0 110 2H7a1 1 0 110-2h2v-2.083A6 6 0 014 9z"
+                    fill="currentColor"
+                  />
+                </svg>
+              </button>
+            </Tooltip>
+          ) : null}
 
           <motion.button
             type="button"

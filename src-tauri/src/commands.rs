@@ -625,6 +625,31 @@ pub async fn ask_ollama(
             agent_cfg.model.clone()
         };
 
+        // Vision auto-routing for Hermes/NIM gateway.
+        // The configured model is typically the reasoning model
+        // (nvidia/llama-3.3-nemotron-super-49b-v1) which is text-only.
+        // When the user attaches images (or triggers /screen), transparently
+        // upgrade this single request to a vision-capable model so the
+        // gateway doesn't reject it with "is not a multimodal model".
+        // Heuristic: any image-bearing message in the conversation history
+        // forces vision for this turn. The text-only model stays selected
+        // for future turns without images.
+        let has_images = messages
+            .iter()
+            .any(|m| m.images.as_ref().is_some_and(|v| !v.is_empty()));
+        let model = if has_images
+            && agent_provider == "hermes"
+            && !model.to_lowercase().contains("vision")
+        {
+            // Hard-coded fallback — matches the vision model exposed by our
+            // gateway in providers::default_models. If the user has selected
+            // a different vision model explicitly (model name contains
+            // "vision"), we respect their choice above.
+            "meta/llama-3.2-90b-vision-instruct".to_string()
+        } else {
+            model
+        };
+
         // Anthropic uses a different on-the-wire format than OpenAI/Hermes;
         // for now we only route Hermes + OpenAI through the OpenAI streamer.
         // Anthropic main-chat support can be added later by calling

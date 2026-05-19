@@ -10,6 +10,7 @@
 
 pub mod commands;
 pub mod config;
+pub mod asr;
 pub mod database;
 pub mod history;
 pub mod images;
@@ -822,6 +823,9 @@ pub fn run() {
             tts::tts_stop,
             #[cfg(not(coverage))]
             tts::tts_list_voices,
+            // ASR (Groq Whisper) — voice input
+            #[cfg(not(coverage))]
+            asr::transcribe_audio,
             // Agent commands (Windows only)
             #[cfg(all(target_os = "windows", not(coverage)))]
             agent::start_agent_mode,

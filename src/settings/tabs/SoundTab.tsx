@@ -32,6 +32,8 @@ export function SoundTab({ config, resyncToken, onSaved }: SoundTabProps) {
   >([]);
   const [notificationSound, setNotificationSound] =
     useState<NotificationSound>('system');
+  /** Groq Whisper API key — stored in SQLite under api_key_groq. */
+  const [groqKey, setGroqKey] = useState('');
 
   useEffect(() => {
     async function loadVoices() {
@@ -46,17 +48,20 @@ export function SoundTab({ config, resyncToken, onSaved }: SoundTabProps) {
     }
     void loadVoices();
 
-    async function loadNotificationSetting() {
+    async function loadSettings() {
       try {
         const settings = await invoke<Record<string, string>>('get_settings');
         if (settings['notification_sound']) {
           setNotificationSound(settings['notification_sound'] as NotificationSound);
         }
+        if (settings['api_key_groq']) {
+          setGroqKey(settings['api_key_groq']);
+        }
       } catch {
         // use default
       }
     }
-    void loadNotificationSetting();
+    void loadSettings();
   }, []);
 
   async function saveNotificationSound(value: NotificationSound) {
@@ -68,6 +73,14 @@ export function SoundTab({ config, resyncToken, onSaved }: SoundTabProps) {
       });
     } catch {
       // ignore
+    }
+  }
+
+  async function saveGroqKey(value: string) {
+    try {
+      await invoke('set_setting', { key: 'api_key_groq', value });
+    } catch {
+      // ignore — user sees error on next mic press
     }
   }
 
@@ -184,6 +197,37 @@ export function SoundTab({ config, resyncToken, onSaved }: SoundTabProps) {
             />
           )}
         />
+      </Section>
+
+      <Section heading="Voice input (Groq Whisper)">
+        <div className="flex flex-col gap-2">
+          <label
+            className="text-xs font-medium"
+            style={{ color: 'var(--color-text-secondary)' }}
+          >
+            Groq API key
+          </label>
+          <input
+            type="password"
+            value={groqKey}
+            onChange={(e) => setGroqKey(e.target.value)}
+            onBlur={() => saveGroqKey(groqKey)}
+            placeholder="gsk_..."
+            className="w-full bg-transparent border-b border-white/20 text-sm focus:outline-none focus:border-primary"
+            style={{
+              color: 'var(--color-text-primary)',
+              padding: '4px 0',
+            }}
+          />
+          <span
+            className="text-xs"
+            style={{ color: 'var(--color-text-secondary)' }}
+          >
+            Stored locally in SQLite. Get a free key at{' '}
+            <code>console.groq.com/keys</code>. Used by the microphone
+            button on the input bar to transcribe with whisper-large-v3.
+          </span>
+        </div>
       </Section>
     </>
   );

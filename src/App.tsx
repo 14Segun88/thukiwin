@@ -16,6 +16,7 @@ import { useOllama } from './hooks/useOllama';
 import type { Message } from './hooks/useOllama';
 import { useTts } from './hooks/useTts';
 import { useTtsQueue, splitSentences } from './hooks/useTtsQueue';
+import { useAsr } from './hooks/useAsr';
 import { useConversationHistory } from './hooks/useConversationHistory';
 import { useAgentMode } from './hooks/useAgentMode';
 import { useModelSelection } from './hooks/useModelSelection';
@@ -268,6 +269,12 @@ function App() {
       streamingTtsBufferRef.current = '';
     }
   }, [speakResponses]);
+
+  // ── Voice input (Whisper via Groq) ──────────────────────────────────────
+  // Push-to-talk hook. The mic button on the ask bar calls start() on first
+  // click and stopAndTranscribe() on second click; the returned transcript is
+  // appended to the query field via setQuery in the AskBarView mic handler.
+  const asr = useAsr({ language: 'ru' });
 
   const inputRef = useRef<HTMLTextAreaElement>(null);
 
@@ -1804,6 +1811,11 @@ function App() {
                   onImagePreview={handleAskBarImagePreview}
                   onScreenshot={handleScreenshot}
                   isDragOver={isDragOver ?? undefined}
+                  onMicStart={asr.start}
+                  onMicStop={asr.stopAndTranscribe}
+                  onMicCancel={asr.cancel}
+                  micState={asr.state}
+                  micError={asr.error}
                 />
               </div>
 
