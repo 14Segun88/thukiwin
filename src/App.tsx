@@ -15,6 +15,7 @@ import { LogicalSize } from '@tauri-apps/api/dpi';
 import { useOllama } from './hooks/useOllama';
 import type { Message } from './hooks/useOllama';
 import { useTts } from './hooks/useTts';
+import { useTtsQueue, splitSentences } from './hooks/useTtsQueue';
 import { useConversationHistory } from './hooks/useConversationHistory';
 import { useAgentMode } from './hooks/useAgentMode';
 import { useModelSelection } from './hooks/useModelSelection';
@@ -166,8 +167,23 @@ function App() {
     [persistTurn],
   );
 
+  // Forward-declared refs for the streaming-TTS observers passed to
+  // useOllama below. The actual handler functions are assigned in an
+  // effect further down (they depend on hook state declared after
+  // useOllama runs). Until the first effect runs the refs are no-ops,
+  // which is safe — no tokens stream before the first request.
+  const handleStreamingTtsTokenRef = useRef<((chunk: string) => void) | null>(
+    null,
+  );
+  const handleStreamingTtsFlushRef = useRef<(() => void) | null>(null);
+  const handleStreamingTtsInterruptRef = useRef<(() => void) | null>(null);
+
   const { messages, ask, askSearch, cancel, isGenerating, reset, loadMessages } =
-    useOllama(handleTurnComplete);
+    useOllama(handleTurnComplete, {
+      onAssistantToken: (chunk) => handleStreamingTtsTokenRef.current?.(chunk),
+      onAssistantDone: () => handleStreamingTtsFlushRef.current?.(),
+      onAssistantInterrupt: () => handleStreamingTtsInterruptRef.current?.(),
+    });
 
   const {
     speakingMessageId,
@@ -180,6 +196,78 @@ function App() {
     privacyAcknowledged,
     acknowledgePrivacy,
   } = useTts();
+
+  // ── Streaming TTS (speak assistant response while it streams) ──────────
+  // Master toggle persisted in localStorage; default OFF so first-run users
+  // don't get unexpected audio. Toggled from the chat header.
+  const [speakResponses, setSpeakResponses] = useState<boolean>(() => {
+    return localStorage.getItem('speak_responses') === 'true';
+  });
+  useEffect(() => {
+    localStorage.setItem('speak_responses', speakResponses ? 'true' : 'false');
+  }, [speakResponses]);
+
+  const ttsQueue = useTtsQueue({
+    enabled: speakResponses,
+    voice: selectedVoice,
+  });
+
+  /** Per-turn streaming-TTS buffer (accumulates partial sentence). */
+  const streamingTtsBufferRef = useRef('');
+
+  const handleStreamingTtsToken = useCallback(
+    (chunk: string) => {
+      if (!speakResponses) return;
+      streamingTtsBufferRef.current += chunk;
+      const { sentences, remainder } = splitSentences(
+        streamingTtsBufferRef.current,
+      );
+      streamingTtsBufferRef.current = remainder;
+      for (const s of sentences) {
+        ttsQueue.enqueue(s);
+      }
+    },
+    [speakResponses, ttsQueue],
+  );
+
+  const handleStreamingTtsFlush = useCallback(() => {
+    if (!speakResponses) {
+      streamingTtsBufferRef.current = '';
+      return;
+    }
+    const trailing = streamingTtsBufferRef.current.trim();
+    streamingTtsBufferRef.current = '';
+    if (trailing.length > 0) {
+      ttsQueue.enqueue(trailing);
+    }
+  }, [speakResponses, ttsQueue]);
+
+  const handleStreamingTtsInterrupt = useCallback(() => {
+    streamingTtsBufferRef.current = '';
+    ttsQueue.cancel();
+  }, [ttsQueue]);
+
+  // Always keep the refs pointing at the latest handler implementations so
+  // the observers given to useOllama stay valid across renders without
+  // re-creating its `ask` closure on every state change.
+  useEffect(() => {
+    handleStreamingTtsTokenRef.current = handleStreamingTtsToken;
+  }, [handleStreamingTtsToken]);
+  useEffect(() => {
+    handleStreamingTtsFlushRef.current = handleStreamingTtsFlush;
+  }, [handleStreamingTtsFlush]);
+  useEffect(() => {
+    handleStreamingTtsInterruptRef.current = handleStreamingTtsInterrupt;
+  }, [handleStreamingTtsInterrupt]);
+
+  // When the user toggles streaming TTS OFF mid-stream, drop the buffer
+  // and silence playback immediately (the queue hook already handles its
+  // own cancel-on-disable, but the partial-sentence buffer is owned here).
+  useEffect(() => {
+    if (!speakResponses) {
+      streamingTtsBufferRef.current = '';
+    }
+  }, [speakResponses]);
 
   const inputRef = useRef<HTMLTextAreaElement>(null);
 
@@ -1613,6 +1701,10 @@ function App() {
                       ttsVoices={ttsVoices}
                       selectedVoice={selectedVoice}
                       onVoiceChange={setSelectedVoice}
+                      speakResponses={speakResponses}
+                      onToggleSpeakResponses={() =>
+                        setSpeakResponses((v) => !v)
+                      }
                     />
                   ) : null}
                 </AnimatePresence>

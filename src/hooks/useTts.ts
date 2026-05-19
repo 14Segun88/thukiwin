@@ -36,7 +36,10 @@ export interface UseTtsReturn {
 
 const STORAGE_KEY_VOICE = 'tts_voice';
 const STORAGE_KEY_PRIVACY = 'tts_privacy_acknowledged';
-const DEFAULT_VOICE = 'tr-TR-EmelNeural';
+// Russian voice by default — the Hermes/NIM stack we ship is primarily used
+// in Russian. Users on other locales can change via the voice selector;
+// the choice is persisted to localStorage and survives reinstall.
+const DEFAULT_VOICE = 'ru-RU-DmitryNeural';
 
 /** Decodes a base64 string to an ArrayBuffer. */
 function base64ToArrayBuffer(base64: string): ArrayBuffer {

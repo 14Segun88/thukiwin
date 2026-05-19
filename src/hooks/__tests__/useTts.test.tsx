@@ -18,7 +18,7 @@ describe('useTts', () => {
 
   it('initializes with default voice', () => {
     const { result } = renderHook(() => useTts());
-    expect(result.current.selectedVoice).toBe('tr-TR-EmelNeural');
+    expect(result.current.selectedVoice).toBe('ru-RU-DmitryNeural');
   });
 
   it('initializes with stored voice', () => {
@@ -140,7 +140,7 @@ describe('useTts', () => {
 
     expect(mockInvoke).toHaveBeenCalledWith('tts_speak', {
       text: 'Hello world',
-      voice: 'tr-TR-EmelNeural',
+      voice: 'ru-RU-DmitryNeural',
       rate: '+0%',
       pitch: '+0%',
     });

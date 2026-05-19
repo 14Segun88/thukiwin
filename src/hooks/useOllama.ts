@@ -1,4 +1,4 @@
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useRef, useEffect } from 'react';
 import { invoke, Channel } from '@tauri-apps/api/core';
 import { notifyIfUnfocused } from '../utils/notification';
 import type {
@@ -57,6 +57,25 @@ export interface SearchOutcome {
 }
 
 /**
+ * Optional side-channel callbacks for observing the streaming lifecycle.
+ *
+ * Used by the streaming-TTS layer to receive each token as it arrives
+ * (for sentence chunking) plus end-of-turn / cancel notifications so it
+ * can flush the queue and stop playback in sync with the chat UI.
+ *
+ * Kept as a second positional parameter (object) so the original
+ * `useOllama(onTurnComplete)` signature stays intact for existing tests.
+ */
+export interface UseOllamaStreamObservers {
+  /** Called for each text token (not thinking tokens) as it streams in. */
+  onAssistantToken?: (chunk: string) => void;
+  /** Called when the assistant turn finishes naturally (Done chunk). */
+  onAssistantDone?: () => void;
+  /** Called when the user cancels generation OR an error replaces the stream. */
+  onAssistantInterrupt?: () => void;
+}
+
+/**
  * A custom hook that simplifies interactions with the local Ollama LLM.
  * It manages message history, streaming state, and sets up Rust IPC channels.
  *
@@ -64,14 +83,25 @@ export interface SearchOutcome {
  *   turn (i.e., when the `Done` chunk is received). Receives the user message
  *   and the finalized assistant message. Not called on `Cancelled` or `Error`.
  *   Used by the caller to persist completed turns to SQLite.
+ * @param observers Optional streaming side-channel callbacks (see
+ *   {@link UseOllamaStreamObservers}). Used by the TTS layer.
  * @returns An object containing the message history, a submit callback function, and operational states.
  */
 export function useOllama(
   onTurnComplete?: (userMsg: Message, assistantMsg: Message) => void,
+  observers?: UseOllamaStreamObservers,
 ) {
   const [messages, setMessages] = useState<Message[]>([]);
   const [isGenerating, setIsGenerating] = useState(false);
   const [searchStage, setSearchStage] = useState<SearchStage>(null);
+
+  // Mirror observers into a ref so the streaming closures always read the
+  // latest callbacks without re-creating `ask` and breaking memoization
+  // for downstream consumers.
+  const observersRef = useRef<UseOllamaStreamObservers | undefined>(observers);
+  useEffect(() => {
+    observersRef.current = observers;
+  }, [observers]);
 
   /**
    * Submits a message to the Ollama backend and initiates the streaming response.
@@ -138,6 +168,7 @@ export function useOllama(
           );
         } else if (chunk.type === 'Token') {
           currentContent += chunk.data;
+          observersRef.current?.onAssistantToken?.(chunk.data);
           setMessages((prev) =>
             prev.map((m) =>
               m.id === assistantId ? { ...m, content: currentContent } : m,
@@ -145,6 +176,7 @@ export function useOllama(
           );
         } else if (chunk.type === 'Done') {
           setIsGenerating(false);
+          observersRef.current?.onAssistantDone?.();
           // Show a desktop toast when the user has switched away from the app.
           void notifyIfUnfocused('ThukiWin', 'Response ready');
           // Notify the caller that a complete turn has finished so it can
@@ -155,12 +187,14 @@ export function useOllama(
             thinkingContent: currentThinkingContent || undefined,
           });
         } else if (chunk.type === 'Cancelled') {
+          observersRef.current?.onAssistantInterrupt?.();
           // Remove the empty assistant placeholder if nothing was generated.
           if (!currentContent && !currentThinkingContent) {
             setMessages((prev) => prev.filter((m) => m.id !== assistantId));
           }
           setIsGenerating(false);
         } else {
+          observersRef.current?.onAssistantInterrupt?.();
           // Replace the streaming placeholder with an error message.
           setMessages((prev) =>
             prev.map((m) =>

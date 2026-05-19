@@ -63,6 +63,10 @@ interface ConversationViewProps {
   selectedVoice: string;
   /** Called when the user selects a different TTS voice. */
   onVoiceChange: (voice: string) => void;
+  /** Whether streaming TTS (speak responses as they arrive) is enabled. */
+  speakResponses?: boolean;
+  /** Toggles the streaming-TTS master switch. */
+  onToggleSpeakResponses?: () => void;
 }
 
 /**
@@ -94,6 +98,8 @@ export function ConversationView({
   ttsVoices,
   selectedVoice,
   onVoiceChange,
+  speakResponses = false,
+  onToggleSpeakResponses,
 }: ConversationViewProps) {
   const scrollContainerRef = useRef<HTMLDivElement>(null);
 
@@ -198,12 +204,31 @@ export function ConversationView({
       />
 
       {/* Voice selector — compact dropdown for TTS voice selection */}
-      <div className="px-4 pt-1 pb-0 flex items-center">
+      <div className="px-4 pt-1 pb-0 flex items-center gap-2">
         <VoiceSelector
           voices={ttsVoices}
           selectedVoice={selectedVoice}
           onVoiceChange={onVoiceChange}
         />
+        {onToggleSpeakResponses ? (
+          <button
+            type="button"
+            onClick={onToggleSpeakResponses}
+            aria-pressed={speakResponses}
+            title={
+              speakResponses
+                ? 'Streaming voice: ON — assistant replies are read aloud as they stream'
+                : 'Streaming voice: OFF — click to enable spoken replies'
+            }
+            className={`text-xs px-2 py-0.5 rounded border transition-colors ${
+              speakResponses
+                ? 'bg-emerald-600/20 border-emerald-500/50 text-emerald-300'
+                : 'bg-transparent border-surface-border text-text-subtle hover:text-text'
+            }`}
+          >
+            {speakResponses ? '🔊 Voice ON' : '🔈 Voice'}
+          </button>
+        ) : null}
       </div>
 
       <div
