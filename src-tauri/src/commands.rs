@@ -505,11 +505,28 @@ pub async fn ask_ollama(
     system_prompt: State<'_, SystemPrompt>,
     active_model_state: State<'_, crate::models::ActiveModelState>,
     ollama_url: State<'_, OllamaUrl>,
+    app_config: State<'_, parking_lot::RwLock<crate::config::AppConfig>>,
+    db: State<'_, crate::history::Database>,
 ) -> Result<(), String> {
     let url = ollama_url.0.lock().unwrap().clone();
     let endpoint = format!("{}/api/chat", url.trim_end_matches('/'));
     let cancel_token = CancellationToken::new();
     generation.set(cancel_token.clone());
+
+    // Snapshot the active agent provider/model/URL from TOML config.
+    // When the user has selected a cloud provider (Hermes/OpenAI/Anthropic),
+    // route this main chat request through OpenAI-compatible streaming
+    // instead of Ollama. The API key lives in SQLite (app_config table),
+    // never in TOML.
+    let agent_cfg = {
+        let cfg = app_config.read();
+        cfg.agent.clone()
+    };
+    let agent_provider = agent_cfg.provider.to_lowercase();
+    let is_cloud_chat =
+        agent_provider == "hermes"
+            || agent_provider == "openai"
+            || agent_provider == "anthropic";
 
     // Build user message content.  When quoted text is present, label it
     // explicitly so the model knows the highlighted text is the primary
@@ -558,18 +575,127 @@ pub async fn ask_ollama(
         .map_err(|e| e.to_string())?
         .clone()
         .unwrap_or_else(|| "gemma3:4b".to_string());
-    let accumulated = stream_ollama_chat(
-        &endpoint,
-        &active_model,
-        messages,
-        think,
-        &client,
-        cancel_token.clone(),
-        |chunk| {
+
+    // Cloud branch: route through OpenAI-compatible streaming.
+    // Hermes/OpenAI/Anthropic all use the same on-the-wire format from our
+    // POV — Hermes is a thin proxy to NVIDIA NIM (Cloudflare Tunnel), and
+    // openai::stream_openai_chat handles both vanilla OpenAI and NIM payloads.
+    // We translate ProviderChunk back to StreamChunk so the frontend doesn't
+    // need to change.
+    let accumulated = if is_cloud_chat {
+        // Look up the API key for the selected provider from the SQLite
+        // app_config table (api_key_hermes / api_key_openai / api_key_anthropic).
+        let api_key: String = {
+            let conn = db
+                .0
+                .lock()
+                .map_err(|e: std::sync::PoisonError<_>| e.to_string())?;
+            crate::database::get_config(&conn, &format!("api_key_{}", agent_provider))
+                .map_err(|e| e.to_string())?
+                .unwrap_or_default()
+        };
+
+        if api_key.is_empty() {
+            let msg = format!(
+                "{} API key is missing\nOpen Settings → Agent and paste your key.",
+                agent_provider
+            );
+            let _ = on_event.send(StreamChunk::Error(OllamaError {
+                kind: OllamaErrorKind::Other,
+                message: msg.clone(),
+            }));
+            generation.clear();
+            return Ok(());
+        }
+
+        let base_url = if agent_cfg.base_url.is_empty() {
+            crate::providers::default_base_url(&match agent_provider.as_str() {
+                "hermes" => crate::providers::Provider::Hermes,
+                "openai" => crate::providers::Provider::OpenAI,
+                "anthropic" => crate::providers::Provider::Anthropic,
+                _ => crate::providers::Provider::OpenAI,
+            })
+            .to_string()
+        } else {
+            agent_cfg.base_url.clone()
+        };
+        let model = if agent_cfg.model.is_empty() {
+            active_model.clone()
+        } else {
+            agent_cfg.model.clone()
+        };
+
+        // Anthropic uses a different on-the-wire format than OpenAI/Hermes;
+        // for now we only route Hermes + OpenAI through the OpenAI streamer.
+        // Anthropic main-chat support can be added later by calling
+        // providers::anthropic::stream_anthropic_chat here.
+        if agent_provider == "anthropic" {
+            let _ = on_event.send(StreamChunk::Error(OllamaError {
+                kind: OllamaErrorKind::Other,
+                message:
+                    "Anthropic main chat not wired yet\nUse Hermes or OpenAI, or run /do for tool use."
+                        .to_string(),
+            }));
+            generation.clear();
+            return Ok(());
+        }
+
+        let mut accumulated = String::new();
+        let send = |chunk: StreamChunk| {
             let _ = on_event.send(chunk);
-        },
-    )
-    .await;
+        };
+        let result = crate::providers::openai::stream_openai_chat(
+            &base_url,
+            &model,
+            &api_key,
+            messages,
+            false, // no computer-use tools in main chat
+            &client,
+            cancel_token.clone(),
+            |pc| match pc {
+                crate::providers::ProviderChunk::Token(t) => {
+                    accumulated.push_str(&t);
+                    send(StreamChunk::Token(t));
+                }
+                crate::providers::ProviderChunk::ThinkingToken(t) => {
+                    send(StreamChunk::ThinkingToken(t));
+                }
+                crate::providers::ProviderChunk::Done => send(StreamChunk::Done),
+                crate::providers::ProviderChunk::Cancelled => send(StreamChunk::Cancelled),
+                crate::providers::ProviderChunk::Error(e) => {
+                    send(StreamChunk::Error(OllamaError {
+                        kind: OllamaErrorKind::Other,
+                        message: format!("Provider error\n{e}"),
+                    }));
+                }
+                crate::providers::ProviderChunk::ToolCalls(_) => {
+                    // Should never happen with include_tools=false, but ignore.
+                }
+            },
+        )
+        .await;
+
+        if let Err(e) = result {
+            send(StreamChunk::Error(OllamaError {
+                kind: OllamaErrorKind::Other,
+                message: format!("{} request failed\n{}", agent_provider, e),
+            }));
+        }
+        accumulated
+    } else {
+        stream_ollama_chat(
+            &endpoint,
+            &active_model,
+            messages,
+            think,
+            &client,
+            cancel_token.clone(),
+            |chunk| {
+                let _ = on_event.send(chunk);
+            },
+        )
+        .await
+    };
 
     // Persist user + assistant messages to in-memory history when the epoch
     // has not changed (no reset during streaming) and we received content.

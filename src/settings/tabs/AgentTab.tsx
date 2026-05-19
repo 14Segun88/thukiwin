@@ -30,29 +30,41 @@ export function AgentTab({ config, resyncToken, onSaved }: AgentTabProps) {
   const [apiKey, setApiKey] = useState('');
   const provider = config.agent.provider as AgentProvider;
 
-  // Load API key from SQLite (not in TOML for security)
+  // Load API key from SQLite (not in TOML for security).
+  // Re-load whenever the active provider changes so the field shows the
+  // correct key for the currently-selected backend. The source of truth
+  // for "which provider is active" is the TOML config (config.agent.provider),
+  // NOT settings['agent_provider'] — the latter was an old code path that
+  // wasn't updated when SaveField was introduced for the agent section.
   useEffect(() => {
     async function loadApiKey() {
+      if (provider === 'ollama') {
+        setApiKey('');
+        return;
+      }
       try {
         const settings = await invoke<Record<string, string>>('get_settings');
-        const prov = settings['agent_provider'] || 'ollama';
-        if (prov !== 'ollama' && settings[`api_key_${prov}`]) {
-          setApiKey(settings[`api_key_${prov}`]);
-        }
+        const stored = settings[`api_key_${provider}`];
+        setApiKey(stored || '');
       } catch {
-        // not set yet
+        setApiKey('');
       }
     }
     void loadApiKey();
-  }, []);
+  }, [provider]);
 
   async function saveApiKey(key: string) {
     try {
       if (provider !== 'ollama') {
         await invoke('set_setting', { key: `api_key_${provider}`, value: key });
+        // Mirror the active provider into the DB so legacy code paths
+        // (search pipeline, agent loop bootstrap, etc.) that still read
+        // settings['agent_provider'] see the correct value. The TOML
+        // remains the canonical source.
+        await invoke('set_setting', { key: 'agent_provider', value: provider });
       }
     } catch {
-      // ignore
+      // ignore — user will see a connection error on next request
     }
   }
 
