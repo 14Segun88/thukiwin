@@ -279,7 +279,7 @@ impl Default for TtsSection {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct AgentSection {
-    /// Provider for agent mode: "ollama", "openai", or "anthropic".
+    /// Provider for agent mode: "ollama", "openai", "anthropic", or "hermes".
     pub provider: String,
     /// Model name for the agent provider (e.g. "gpt-4o", "claude-3.5-sonnet").
     pub model: String,

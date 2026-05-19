@@ -10,13 +10,14 @@ import { SaveField } from '../components/SaveField';
 import { configHelp } from '../configHelpers';
 import type { RawAppConfig } from '../types';
 
-type AgentProvider = 'ollama' | 'openai' | 'anthropic';
+type AgentProvider = 'ollama' | 'openai' | 'anthropic' | 'hermes';
 
-const PROVIDERS: AgentProvider[] = ['ollama', 'openai', 'anthropic'];
+const PROVIDERS: AgentProvider[] = ['ollama', 'openai', 'anthropic', 'hermes'];
 const PROVIDER_LABELS: Record<AgentProvider, string> = {
   ollama: 'Ollama (Local)',
   openai: 'OpenAI',
   anthropic: 'Anthropic',
+  hermes: 'Hermes (NVIDIA NIM via VPS)',
 };
 
 interface AgentTabProps {
@@ -116,7 +117,9 @@ export function AgentTab({ config, resyncToken, onSaved }: AgentTabProps) {
                   ? 'https://api.openai.com/v1'
                   : provider === 'anthropic'
                     ? 'https://api.anthropic.com'
-                    : 'http://127.0.0.1:11434'
+                    : provider === 'hermes'
+                      ? 'https://<your-tunnel>.trycloudflare.com/v1'
+                      : 'http://127.0.0.1:11434'
               }
               errored={errored}
               ariaLabel="Agent base URL"
@@ -136,7 +139,13 @@ export function AgentTab({ config, resyncToken, onSaved }: AgentTabProps) {
               value={apiKey}
               onChange={(e) => setApiKey(e.target.value)}
               onBlur={() => saveApiKey(apiKey)}
-              placeholder={provider === 'openai' ? 'sk-...' : 'sk-ant-...'}
+              placeholder={
+                provider === 'openai'
+                  ? 'sk-...'
+                  : provider === 'anthropic'
+                    ? 'sk-ant-...'
+                    : 'Hermes gateway BEARER_TOKEN'
+              }
               className="w-full bg-transparent border-b border-white/20 text-sm focus:outline-none focus:border-primary"
               style={{ color: 'var(--color-text-primary)', padding: '4px 0' }}
             />

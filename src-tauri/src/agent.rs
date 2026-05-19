@@ -358,7 +358,12 @@ pub async fn run_agent_loop(
 
     let provider_config = state.get_provider_config();
     let use_tool_use = provider_config.as_ref().map_or(false, |c| {
-        matches!(c.provider, providers::Provider::OpenAI | providers::Provider::Anthropic)
+        matches!(
+            c.provider,
+            providers::Provider::OpenAI
+                | providers::Provider::Anthropic
+                | providers::Provider::Hermes
+        )
     });
 
     if use_tool_use {
@@ -446,7 +451,12 @@ async fn run_tool_use_loop(
         };
 
         let result = match config.provider {
-            providers::Provider::OpenAI => {
+            providers::Provider::OpenAI | providers::Provider::Hermes => {
+                // Hermes exposes an OpenAI-compatible /v1/chat/completions
+                // endpoint (proxied to NVIDIA NIM by the gateway on the VPS),
+                // so we share the OpenAI streaming path. The only difference
+                // is the base_url and the Bearer token (gateway-issued, not
+                // the upstream NIM key).
                 providers::openai::stream_openai_chat(
                     &config.base_url,
                     &config.model,
@@ -1022,6 +1032,7 @@ pub fn set_agent_provider(
         "ollama" => providers::Provider::Ollama,
         "openai" => providers::Provider::OpenAI,
         "anthropic" => providers::Provider::Anthropic,
+        "hermes" => providers::Provider::Hermes,
         _ => return Err(format!("Unknown provider: {}", provider)),
     };
     let config = ProviderConfig {

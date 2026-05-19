@@ -1,8 +1,13 @@
 //! Provider abstraction for multi-backend LLM support.
 //!
-//! Routes requests to the correct backend (Ollama, OpenAI, Anthropic)
+//! Routes requests to the correct backend (Ollama, OpenAI, Anthropic, Hermes)
 //! based on user configuration. Each provider implements the same streaming
 //! interface but translates messages to its own API format.
+//!
+//! `Hermes` is a remote NVIDIA NIM proxy hosted on the user's VPS, exposed
+//! via Cloudflare Tunnel. It speaks the OpenAI Chat Completions API on the
+//! wire, so it reuses `openai::stream_openai_chat` with a different
+//! base URL and bearer token — no separate transport needed.
 
 pub mod openai;
 pub mod anthropic;
@@ -16,6 +21,9 @@ pub enum Provider {
     Ollama,
     OpenAI,
     Anthropic,
+    /// Hermes Agent on user's VPS — OpenAI-compatible proxy to NVIDIA NIM.
+    /// See https://github.com/NousResearch/hermes-agent
+    Hermes,
 }
 
 /// Runtime configuration for the active provider.
@@ -25,9 +33,15 @@ pub struct ProviderConfig {
     pub provider: Provider,
     /// Model name to send to the provider.
     pub model: String,
-    /// Base URL for the provider API (Ollama: http://127.0.0.1:11434, OpenAI: https://api.openai.com/v1, Anthropic: https://api.anthropic.com).
+    /// Base URL for the provider API.
+    ///
+    /// - Ollama: `http://127.0.0.1:11434`
+    /// - OpenAI: `https://api.openai.com/v1`
+    /// - Anthropic: `https://api.anthropic.com`
+    /// - Hermes:   `https://<tunnel-id>.trycloudflare.com/v1`
     pub base_url: String,
     /// API key for cloud providers (empty for Ollama).
+    /// For Hermes this is the gateway BEARER_TOKEN, not the upstream NIM key.
     pub api_key: String,
 }
 
@@ -72,11 +86,16 @@ pub enum ProviderChunk {
 }
 
 /// Returns default base URLs for each provider.
+///
+/// For `Hermes` we return an empty string — the user MUST configure their
+/// own Cloudflare Tunnel URL in Settings (the tunnel URL is per-deployment
+/// and not a stable default).
 pub fn default_base_url(provider: &Provider) -> &'static str {
     match provider {
         Provider::Ollama => "http://127.0.0.1:11434",
         Provider::OpenAI => "https://api.openai.com/v1",
         Provider::Anthropic => "https://api.anthropic.com",
+        Provider::Hermes => "",
     }
 }
 
@@ -86,6 +105,13 @@ pub fn default_models(provider: &Provider) -> &'static [&'static str] {
         Provider::Ollama => &["gemini-3-flash-preview", "llama3.2-vision", "llama3.2", "mistral"],
         Provider::OpenAI => &["gpt-4o", "gpt-4o-mini", "gpt-4-turbo"],
         Provider::Anthropic => &["claude-sonnet-4-20250514", "claude-3-5-sonnet-20241022", "claude-3-5-haiku-20241022"],
+        // Models exposed by our Hermes/NIM gateway (see openai_gateway.py /v1/models).
+        Provider::Hermes => &[
+            "nvidia/llama-3.3-nemotron-super-49b-v1",
+            "meta/llama-3.3-70b-instruct",
+            "meta/llama-3.2-90b-vision-instruct",
+            "nvidia/llama-3.1-nemotron-nano-8b-v1",
+        ],
     }
 }
 
@@ -98,6 +124,7 @@ mod tests {
         assert_eq!(serde_json::to_string(&Provider::Ollama).unwrap(), "\"ollama\"");
         assert_eq!(serde_json::to_string(&Provider::OpenAI).unwrap(), "\"openai\"");
         assert_eq!(serde_json::to_string(&Provider::Anthropic).unwrap(), "\"anthropic\"");
+        assert_eq!(serde_json::to_string(&Provider::Hermes).unwrap(), "\"hermes\"");
     }
 
     #[test]
@@ -113,12 +140,19 @@ mod tests {
         assert_eq!(default_base_url(&Provider::Ollama), "http://127.0.0.1:11434");
         assert_eq!(default_base_url(&Provider::OpenAI), "https://api.openai.com/v1");
         assert_eq!(default_base_url(&Provider::Anthropic), "https://api.anthropic.com");
+        assert_eq!(default_base_url(&Provider::Hermes), "");
     }
 
     #[test]
     fn default_models_not_empty() {
-        for provider in &[Provider::Ollama, Provider::OpenAI, Provider::Anthropic] {
+        for provider in &[Provider::Ollama, Provider::OpenAI, Provider::Anthropic, Provider::Hermes] {
             assert!(!default_models(provider).is_empty());
         }
+    }
+
+    #[test]
+    fn hermes_default_models_include_nemotron() {
+        let models = default_models(&Provider::Hermes);
+        assert!(models.iter().any(|m| m.contains("nemotron")));
     }
 }
