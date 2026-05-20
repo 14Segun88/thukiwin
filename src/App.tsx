@@ -1819,6 +1819,8 @@ function App() {
                   onMicCancel={asr.cancel}
                   micState={asr.state}
                   micError={asr.error}
+                  micLevel={asr.level}
+                  micElapsedMs={asr.elapsedMs}
                   onLogsOpen={() => setIsLogsOpen((v) => !v)}
                 />
                 <LogsPanel

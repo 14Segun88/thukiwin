@@ -11,12 +11,10 @@
  * the recorder produces ~330 B/s of opus silence and Whisper either
  * hallucinates or returns nothing.
  *
- * Note: there is no API to *force* MediaRecorder onto a specific
- * device in our useAsr hook today — Windows / WebView2 returns the
- * default. The picker here is a diagnostic: once the user identifies
- * the working device, they switch Windows default to it in Sound
- * settings. We surface a clear "Open Windows Sound settings" shortcut
- * to make that one click away.
+ * All styling uses inline `style` props with explicit colors instead of
+ * Tailwind utility classes. The settings window's CSS surface is dark
+ * but the underlying html background is the OS default — relying on
+ * Tailwind classes here led to invisible (white-on-white) controls.
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react';
@@ -25,6 +23,42 @@ interface AudioInput {
   deviceId: string;
   label: string;
 }
+
+const COLORS = {
+  text: '#f0f0f2',
+  textSecondary: '#a8a8ad',
+  bg: '#1a1a1a',
+  bgPanel: '#2a2a2a',
+  border: 'rgba(255,255,255,0.15)',
+  borderStrong: 'rgba(255,255,255,0.25)',
+  meterEmpty: 'rgba(255,255,255,0.10)',
+  meterGreen: '#34d399',
+  meterAmber: '#fbbf24',
+  meterRed: '#f87171',
+  error: '#f87171',
+};
+
+const BUTTON: React.CSSProperties = {
+  background: COLORS.bgPanel,
+  color: COLORS.text,
+  border: `1px solid ${COLORS.borderStrong}`,
+  borderRadius: 4,
+  padding: '4px 10px',
+  fontSize: 12,
+  cursor: 'pointer',
+  lineHeight: 1.3,
+};
+
+const SELECT: React.CSSProperties = {
+  background: COLORS.bgPanel,
+  color: COLORS.text,
+  border: `1px solid ${COLORS.borderStrong}`,
+  borderRadius: 4,
+  padding: '4px 8px',
+  fontSize: 12,
+  flex: 1,
+  minWidth: 0,
+};
 
 export function MicrophoneTester() {
   const [devices, setDevices] = useState<AudioInput[]>([]);
@@ -64,7 +98,6 @@ export function MicrophoneTester() {
 
   useEffect(() => {
     void loadDevices();
-    // Refresh when devices are plugged/unplugged.
     const handler = () => void loadDevices();
     navigator.mediaDevices?.addEventListener?.('devicechange', handler);
     return () => {
@@ -147,14 +180,23 @@ export function MicrophoneTester() {
   const litCount = Math.min(24, Math.round(Math.sqrt(level) * 24));
 
   return (
-    <div className="flex flex-col gap-2">
-      <div className="flex items-center gap-2">
+    <div
+      style={{
+        display: 'flex',
+        flexDirection: 'column',
+        gap: 8,
+        background: COLORS.bg,
+        border: `1px solid ${COLORS.border}`,
+        borderRadius: 6,
+        padding: 10,
+      }}
+    >
+      <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
         <select
           value={selected}
           onChange={(e) => setSelected(e.target.value)}
           aria-label="Input device"
-          className="flex-1 bg-transparent border border-white/20 rounded px-2 py-1 text-xs"
-          style={{ color: 'var(--color-text-primary)' }}
+          style={SELECT}
         >
           {devices.length === 0 ? (
             <option value="">(no input devices found)</option>
@@ -166,39 +208,47 @@ export function MicrophoneTester() {
             ))
           )}
         </select>
-        <button
-          type="button"
-          onClick={isActive ? stop : start}
-          className="text-xs px-3 py-1 rounded border border-white/20 hover:bg-white/8"
-          style={{ color: 'var(--color-text-primary)' }}
-        >
+        <button type="button" onClick={isActive ? stop : start} style={BUTTON}>
           {isActive ? 'Stop' : 'Test'}
         </button>
         <button
           type="button"
           onClick={() => void loadDevices()}
-          className="text-xs px-2 py-1 rounded border border-white/20 hover:bg-white/8"
-          style={{ color: 'var(--color-text-secondary)' }}
           title="Re-scan input devices"
+          style={{ ...BUTTON, padding: '4px 8px' }}
         >
           ↻
         </button>
       </div>
 
       <div
-        className="flex items-center gap-1 h-6 px-2 rounded bg-black/30 border border-white/10"
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          gap: 3,
+          height: 28,
+          padding: '0 8px',
+          borderRadius: 4,
+          background: 'rgba(0,0,0,0.5)',
+          border: `1px solid ${COLORS.border}`,
+        }}
         aria-label="Microphone level meter"
       >
         {bars.map((_, i) => {
           const isLit = i < litCount;
-          const color = i < 14 ? '#34d399' : i < 20 ? '#fbbf24' : '#f87171';
+          const color =
+            i < 14
+              ? COLORS.meterGreen
+              : i < 20
+                ? COLORS.meterAmber
+                : COLORS.meterRed;
           return (
             <div
               key={i}
               style={{
-                width: 4,
-                height: isLit ? 16 : 4,
-                background: isLit ? color : 'rgba(255,255,255,0.12)',
+                width: 5,
+                height: isLit ? 18 : 4,
+                background: isLit ? color : COLORS.meterEmpty,
                 borderRadius: 1,
                 transition: 'height 60ms linear, background 60ms linear',
               }}
@@ -208,18 +258,24 @@ export function MicrophoneTester() {
       </div>
 
       <div
-        className="flex items-center justify-between text-[11px]"
-        style={{ color: 'var(--color-text-secondary)' }}
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          fontSize: 11,
+          color: COLORS.textSecondary,
+          gap: 8,
+        }}
       >
-        <span>
-          live:&nbsp;
-          <code>{level.toFixed(4)}</code>&nbsp; peak:&nbsp;
-          <code>{peak.toFixed(4)}</code>
+        <span style={{ whiteSpace: 'nowrap' }}>
+          live: <code style={{ color: COLORS.text }}>{level.toFixed(4)}</code>
+          &nbsp;&nbsp; peak:{' '}
+          <code style={{ color: COLORS.text }}>{peak.toFixed(4)}</code>
         </span>
-        <span>
+        <span style={{ textAlign: 'right' }}>
           {isActive
             ? peak < 0.005
-              ? 'Silent — speak into the mic; if the bar stays empty this device is not capturing audio.'
+              ? 'Silent — speak into the mic. If the bar stays empty this device is not capturing audio.'
               : peak < 0.05
                 ? 'Very quiet — try a closer mic or raise input level in Windows.'
                 : 'Signal OK ✓'
@@ -228,18 +284,13 @@ export function MicrophoneTester() {
       </div>
 
       {error ? (
-        <div className="text-[11px]" style={{ color: '#f87171' }}>
-          {error}
-        </div>
+        <div style={{ fontSize: 11, color: COLORS.error }}>{error}</div>
       ) : null}
 
-      <div
-        className="text-[11px]"
-        style={{ color: 'var(--color-text-secondary)' }}
-      >
+      <div style={{ fontSize: 11, color: COLORS.textSecondary }}>
         ThukiWin records with the <strong>Windows default</strong> input.
-        Whatever device shows a green signal here is the one to set as
-        default in Settings → System → Sound → Input.
+        Whatever device shows a green signal here is the one to set as default
+        in Settings → System → Sound → Input.
       </div>
     </div>
   );

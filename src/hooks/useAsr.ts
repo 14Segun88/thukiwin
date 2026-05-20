@@ -35,6 +35,11 @@ export interface UseAsrReturn {
   error: string | null;
   /** True while either recording or transcribing. UI should show a busy state. */
   isBusy: boolean;
+  /** Normalised live audio amplitude (0..1). Updated ~60Hz during recording.
+   *  Components can render a waveform / pulse / VU meter from this. */
+  level: number;
+  /** Milliseconds elapsed since the current recording started. 0 when idle. */
+  elapsedMs: number;
   /** Start microphone recording. Resolves once recording has actually started. */
   start: () => Promise<void>;
   /**
@@ -95,6 +100,9 @@ export function useAsr(opts: UseAsrOptions = {}): UseAsrReturn {
   const { language } = opts;
   const [state, setState] = useState<AsrState>('idle');
   const [error, setError] = useState<string | null>(null);
+  /** Reactive copies of the level/elapsed refs so consumers re-render. */
+  const [level, setLevel] = useState(0);
+  const [elapsedMs, setElapsedMs] = useState(0);
 
   const recorderRef = useRef<MediaRecorder | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
@@ -200,6 +208,10 @@ export function useAsr(opts: UseAsrOptions = {}): UseAsrReturn {
               if (v > max) max = v;
             }
             if (max > peakLevelRef.current) peakLevelRef.current = max;
+            // Publish to React state — used by the AskBar recording widget
+            // to draw a live waveform and timer.
+            setLevel(max);
+            setElapsedMs(Date.now() - recordingStartedAtRef.current);
             levelRafRef.current = requestAnimationFrame(tick);
           };
           levelRafRef.current = requestAnimationFrame(tick);
@@ -372,12 +384,16 @@ export function useAsr(opts: UseAsrOptions = {}): UseAsrReturn {
     teardown();
     setState('idle');
     setError(null);
+    setLevel(0);
+    setElapsedMs(0);
   }, [teardown]);
 
   return {
     state,
     error,
     isBusy: state === 'recording' || state === 'transcribing',
+    level,
+    elapsedMs,
     start,
     stopAndTranscribe,
     cancel,

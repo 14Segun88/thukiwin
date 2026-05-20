@@ -398,6 +398,11 @@ pub async fn stream_openai_chat(
     let mut tool_calls_in_progress: Vec<OpenAIToolCall> = Vec::new();
     let mut sse_lines: u32 = 0;
     let mut json_parse_errors: u32 = 0;
+    // SSE frames can be split across multiple `bytes_stream` chunks — TCP /
+    // HTTP buffers do not respect newline boundaries. We accumulate raw bytes
+    // in `pending` and only consume complete lines (newline-terminated). The
+    // trailing partial line stays in the buffer until the next chunk arrives.
+    let mut pending = String::new();
 
     loop {
         tokio::select! {
@@ -417,8 +422,26 @@ pub async fn stream_openai_chat(
             chunk_opt = stream.next() => {
                 match chunk_opt {
                     Some(Ok(bytes)) => {
-                        let text = String::from_utf8_lossy(&bytes);
-                        for line in text.lines() {
+                        // Append raw chunk to the rolling buffer, then drain
+                        // complete lines. Whatever remains after the last `\n`
+                        // is a partial line — keep it for the next iteration.
+                        pending.push_str(&String::from_utf8_lossy(&bytes));
+                        let mut lines: Vec<String> = Vec::new();
+                        let tail_start = match pending.rfind('\n') {
+                            Some(idx) => idx + 1,
+                            None => {
+                                // No newline yet — entire buffer is partial,
+                                // skip processing and wait for more bytes.
+                                continue;
+                            }
+                        };
+                        for line in pending[..tail_start].split('\n') {
+                            lines.push(line.to_string());
+                        }
+                        // Preserve the trailing partial fragment.
+                        pending = pending[tail_start..].to_string();
+
+                        for line in lines {
                             let line = line.trim();
                             if !line.starts_with("data: ") {
                                 continue;

@@ -6,6 +6,7 @@ import { quote } from '../config';
 import { ImageThumbnails } from '../components/ImageThumbnails';
 import { CommandSuggestion } from '../components/CommandSuggestion';
 import { Tooltip } from '../components/Tooltip';
+import { RecordingIndicator } from '../components/RecordingIndicator';
 import type { AttachedImage } from '../types/image';
 import { MAX_IMAGE_SIZE_BYTES } from '../types/image';
 import { COMMANDS } from '../config/commands';
@@ -248,6 +249,10 @@ interface AskBarViewProps {
   onMicCancel?: () => void;
   micState?: 'idle' | 'requesting' | 'recording' | 'transcribing' | 'error';
   micError?: string | null;
+  /** Live audio amplitude from useAsr (0..1). Drives the recording waveform. */
+  micLevel?: number;
+  /** Milliseconds since recording started. Drives the recording timer. */
+  micElapsedMs?: number;
   /**
    * Toggles the in-app Diagnostics panel. When omitted, the logs button is
    * hidden — kept optional so existing tests don't need to provide it.
@@ -284,6 +289,8 @@ export function AskBarView({
   onMicCancel,
   micState = 'idle',
   micError,
+  micLevel = 0,
+  micElapsedMs = 0,
   onLogsOpen,
 }: AskBarViewProps) {
   /** Ref to the mirror div behind the textarea for command highlighting. */
@@ -547,6 +554,24 @@ export function AskBarView({
 
   return (
     <div className={`flex flex-col w-full shrink-0 ${ringClass}`}>
+      {/* Recording indicator — Telegram-style waveform + timer. Rendered
+          inline above the input bar so the user has unambiguous visual
+          feedback that the microphone is actually capturing. */}
+      {(micState === 'recording' || micState === 'transcribing') &&
+      onMicStop &&
+      onMicCancel ? (
+        <RecordingIndicator
+          level={micLevel}
+          elapsedMs={micElapsedMs}
+          state={micState}
+          onCancel={onMicCancel}
+          onStop={() => {
+            // Same path as the mic-button click handler — the button below
+            // handles the result. We just trigger the stop here.
+            void onMicStop().catch(() => {});
+          }}
+        />
+      ) : null}
       {selectedText && (
         <div className="px-4 pt-2 pb-0">
           <p className="italic text-xs text-text-secondary select-text whitespace-pre-wrap">
