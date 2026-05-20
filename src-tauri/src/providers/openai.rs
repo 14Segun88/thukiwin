@@ -357,6 +357,17 @@ pub async fn stream_openai_chat(
         stream: true,
     };
 
+    crate::diagnostics::log(
+        "hermes",
+        &format!(
+            "POST {} model={} messages={} tools={}",
+            url,
+            model,
+            request.messages.len(),
+            request.tools.len()
+        ),
+    );
+
     let response = client
         .post(&url)
         .header("Authorization", format!("Bearer {}", api_key))
@@ -364,22 +375,42 @@ pub async fn stream_openai_chat(
         .json(&request)
         .send()
         .await
-        .map_err(|e| format!("OpenAI request failed: {e}"))?;
+        .map_err(|e| {
+            crate::diagnostics::log("hermes", &format!("network error: {e}"));
+            format!("OpenAI request failed: {e}")
+        })?;
 
     if !response.status().is_success() {
         let status = response.status();
         let body = response.text().await.unwrap_or_default();
+        let snippet: String = body.chars().take(400).collect();
+        crate::diagnostics::log(
+            "hermes",
+            &format!("HTTP {} — {}", status.as_u16(), snippet),
+        );
         return Err(format!("OpenAI returned status {}: {}", status, body));
     }
+
+    crate::diagnostics::log("hermes", "stream opened (HTTP 200)");
 
     let mut stream = response.bytes_stream();
     let mut accumulated = String::new();
     let mut tool_calls_in_progress: Vec<OpenAIToolCall> = Vec::new();
+    let mut sse_lines: u32 = 0;
+    let mut json_parse_errors: u32 = 0;
 
     loop {
         tokio::select! {
             biased;
             _ = cancel_token.cancelled() => {
+                crate::diagnostics::log(
+                    "hermes",
+                    &format!(
+                        "stream cancelled by user (sse_lines={}, accumulated={} chars)",
+                        sse_lines,
+                        accumulated.chars().count()
+                    ),
+                );
                 on_chunk(ProviderChunk::Cancelled);
                 return Ok(accumulated);
             }
@@ -392,8 +423,19 @@ pub async fn stream_openai_chat(
                             if !line.starts_with("data: ") {
                                 continue;
                             }
+                            sse_lines += 1;
                             let data = &line[6..];
                             if data == "[DONE]" {
+                                crate::diagnostics::log(
+                                    "hermes",
+                                    &format!(
+                                        "stream done: sse_lines={}, accumulated={} chars, parse_errors={}, preview={:?}",
+                                        sse_lines,
+                                        accumulated.chars().count(),
+                                        json_parse_errors,
+                                        accumulated.chars().take(120).collect::<String>()
+                                    ),
+                                );
                                 // Emit any pending tool calls.
                                 if !tool_calls_in_progress.is_empty() {
                                     let converted: Vec<ToolCall> = tool_calls_in_progress
@@ -411,8 +453,9 @@ pub async fn stream_openai_chat(
                             }
 
                             let parsed: Result<OpenAIStreamChunk, _> = serde_json::from_str(data);
-                            if let Ok(chunk) = parsed {
-                                for choice in &chunk.choices {
+                            match parsed {
+                                Ok(chunk) => {
+                                    for choice in &chunk.choices {
                                     // Text content.
                                     if let Some(ref content) = choice.delta.content {
                                         if !content.is_empty() {
@@ -454,6 +497,14 @@ pub async fn stream_openai_chat(
                                     // Check for finish.
                                     if let Some(ref reason) = choice.finish_reason {
                                         if reason == "tool_calls" || reason == "stop" {
+                                            crate::diagnostics::log(
+                                                "hermes",
+                                                &format!(
+                                                    "finish_reason={} accumulated={} chars",
+                                                    reason,
+                                                    accumulated.chars().count()
+                                                ),
+                                            );
                                             if !tool_calls_in_progress.is_empty() {
                                                 let converted: Vec<ToolCall> = tool_calls_in_progress
                                                     .into_iter()
@@ -469,14 +520,44 @@ pub async fn stream_openai_chat(
                                         }
                                     }
                                 }
+                                }
+                                Err(e) => {
+                                    json_parse_errors += 1;
+                                    if json_parse_errors <= 3 {
+                                        crate::diagnostics::log(
+                                            "hermes",
+                                            &format!(
+                                                "SSE parse error #{json_parse_errors}: {e} — line preview: {:?}",
+                                                data.chars().take(160).collect::<String>()
+                                            ),
+                                        );
+                                    }
+                                }
                             }
                         }
                     }
                     Some(Err(e)) => {
+                        crate::diagnostics::log(
+                            "hermes",
+                            &format!(
+                                "stream error after {} sse lines / {} chars: {e}",
+                                sse_lines,
+                                accumulated.chars().count()
+                            ),
+                        );
                         on_chunk(ProviderChunk::Error(format!("Stream error: {e}")));
                         return Err(format!("OpenAI stream error: {e}"));
                     }
                     None => {
+                        crate::diagnostics::log(
+                            "hermes",
+                            &format!(
+                                "stream ended without [DONE]: sse_lines={}, accumulated={} chars, parse_errors={}",
+                                sse_lines,
+                                accumulated.chars().count(),
+                                json_parse_errors
+                            ),
+                        );
                         if !tool_calls_in_progress.is_empty() {
                             let converted: Vec<ToolCall> = tool_calls_in_progress
                                 .into_iter()

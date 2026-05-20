@@ -100,6 +100,13 @@ export function useAsr(opts: UseAsrOptions = {}): UseAsrReturn {
   const streamRef = useRef<MediaStream | null>(null);
   const chunksRef = useRef<Blob[]>([]);
   const recordingStartedAtRef = useRef<number>(0);
+  /** Peak normalised audio amplitude observed during recording. 0 = silent,
+   *  1 = clip. Used to surface a clear "your mic captured silence" error
+   *  instead of letting Whisper return junk or the user wonder why their
+   *  recording was skipped. */
+  const peakLevelRef = useRef<number>(0);
+  const audioCtxRef = useRef<AudioContext | null>(null);
+  const levelRafRef = useRef<number | null>(null);
   const stopResolverRef = useRef<((value: Blob) => void) | null>(null);
   const stopRejecterRef = useRef<((reason: unknown) => void) | null>(null);
 
@@ -116,6 +123,20 @@ export function useAsr(opts: UseAsrOptions = {}): UseAsrReturn {
     } catch {
       // ignore
     }
+    if (levelRafRef.current != null) {
+      try {
+        cancelAnimationFrame(levelRafRef.current);
+      } catch {
+        // ignore
+      }
+      levelRafRef.current = null;
+    }
+    try {
+      void audioCtxRef.current?.close();
+    } catch {
+      // ignore
+    }
+    audioCtxRef.current = null;
     recorderRef.current = null;
     streamRef.current = null;
     chunksRef.current = [];
@@ -150,8 +171,53 @@ export function useAsr(opts: UseAsrOptions = {}): UseAsrReturn {
       recorderRef.current = rec;
       chunksRef.current = [];
       recordingStartedAtRef.current = Date.now();
+      peakLevelRef.current = 0;
+
+      // Attach a real-time RMS meter via WebAudio so we can detect a
+      // silent microphone (wrong device, muted in OS mixer, no input at
+      // all). We deliberately do NOT analyse the encoded blob — webm/opus
+      // decoding in the renderer would be expensive and pointless when the
+      // raw PCM is already available from the same MediaStream.
+      try {
+        // Some webviews expose AudioContext under the webkit prefix.
+        const Ctx = (
+          window as unknown as { AudioContext?: typeof AudioContext; webkitAudioContext?: typeof AudioContext }
+        ).AudioContext ?? (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+        if (Ctx) {
+          const ctx = new Ctx();
+          audioCtxRef.current = ctx;
+          const source = ctx.createMediaStreamSource(stream);
+          const analyser = ctx.createAnalyser();
+          analyser.fftSize = 512;
+          source.connect(analyser);
+          const buf = new Float32Array(analyser.fftSize);
+          const tick = () => {
+            if (!recorderRef.current) return;
+            analyser.getFloatTimeDomainData(buf);
+            let max = 0;
+            for (let i = 0; i < buf.length; i++) {
+              const v = Math.abs(buf[i]);
+              if (v > max) max = v;
+            }
+            if (max > peakLevelRef.current) peakLevelRef.current = max;
+            levelRafRef.current = requestAnimationFrame(tick);
+          };
+          levelRafRef.current = requestAnimationFrame(tick);
+        } else {
+          asrLog('AudioContext unavailable — skipping level meter');
+        }
+      } catch (e) {
+        asrLog(`level meter init failed: ${(e as Error).message}`);
+      }
+
+      let chunkCount = 0;
+      let chunkBytes = 0;
       rec.ondataavailable = (e) => {
-        if (e.data && e.data.size > 0) chunksRef.current.push(e.data);
+        if (e.data && e.data.size > 0) {
+          chunkCount += 1;
+          chunkBytes += e.data.size;
+          chunksRef.current.push(e.data);
+        }
       };
       rec.onerror = (e) => {
         const msg = (e as ErrorEvent).message || 'Recorder error';
@@ -168,7 +234,7 @@ export function useAsr(opts: UseAsrOptions = {}): UseAsrReturn {
         asrLog(
           `recorder stopped: bytes=${blob.size} type=${blob.type} duration_ms=${
             Date.now() - recordingStartedAtRef.current
-          }`,
+          } chunks=${chunkCount} chunk_bytes=${chunkBytes} peak_level=${peakLevelRef.current.toFixed(4)}`,
         );
         stopResolverRef.current?.(blob);
       };
@@ -213,24 +279,56 @@ export function useAsr(opts: UseAsrOptions = {}): UseAsrReturn {
     recorderRef.current = null;
 
     try {
+      const recordingMs = Date.now() - recordingStartedAtRef.current;
+      const peak = peakLevelRef.current;
+
       if (blob.size === 0) {
+        const msg =
+          'Recorder produced no audio. Open Windows Sound settings → Input and confirm the right microphone is selected and unmuted.';
         asrLog('empty blob — nothing to transcribe');
-        setState('idle');
+        setError(msg);
+        setState('error');
         return '';
       }
-      // Reject very short recordings client-side too — Whisper hallucinates
-      // canonical training-set phrases ("продолжение следует", "thanks for
-      // watching", etc.) when fed near-silence. The backend has a matching
-      // 2 KiB floor; the client check exists so we don't even pay the
-      // base64+IPC+HTTPS cost for accidental taps.
-      const recordingMs = Date.now() - recordingStartedAtRef.current;
-      if (blob.size < 2048 || recordingMs < 350) {
+
+      // Heuristic: a recording that lasted >800 ms but yielded <2 KiB of
+      // opus AND had a near-zero peak amplitude is almost certainly a
+      // silent / wrong-device microphone. Opus VBR can compress true
+      // silence down to ~6 kbps, so a 3-second silent clip lands around
+      // 2 KiB — exactly the case from the user's log
+      // (1135 bytes / 3.4 s / unmeasured peak).
+      const looksSilent = peak > 0 && peak < 0.005;
+      if (
+        recordingMs > 800 &&
+        blob.size < 2048 &&
+        (looksSilent || peak === 0)
+      ) {
+        const msg =
+          `Microphone captured silence (peak ${peak.toFixed(4)}, ` +
+          `${blob.size} B over ${recordingMs} ms). Check Windows ` +
+          `Sound → Input: is the correct mic selected and unmuted? ` +
+          `Disable "Voice Isolation" if active.`;
+        asrLog(msg);
+        setError(msg);
+        setState('error');
+        return '';
+      }
+
+      // Below this many bytes AND under ~350 ms we treat as an accidental
+      // tap (the user pressed and released the mic button by mistake).
+      if (blob.size < 2048 && recordingMs < 350) {
         asrLog(
-          `recording too short: bytes=${blob.size} ms=${recordingMs} — skipped`,
+          `recording too short: bytes=${blob.size} ms=${recordingMs} — skipped (likely accidental tap)`,
         );
         setState('idle');
         return '';
       }
+
+      // Otherwise — even small blobs go to Whisper if the meter saw real
+      // audio. Opus is efficient, a clear "stop" word can be <2 KiB.
+      asrLog(
+        `proceeding to backend: bytes=${blob.size} ms=${recordingMs} peak=${peak.toFixed(4)}`,
+      );
       const audioBase64 = await blobToBase64(blob);
       asrLog(
         `sending to backend: base64_len=${audioBase64.length} mime=${blob.type}`,
