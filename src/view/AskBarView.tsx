@@ -248,6 +248,11 @@ interface AskBarViewProps {
   onMicCancel?: () => void;
   micState?: 'idle' | 'requesting' | 'recording' | 'transcribing' | 'error';
   micError?: string | null;
+  /**
+   * Toggles the in-app Diagnostics panel. When omitted, the logs button is
+   * hidden — kept optional so existing tests don't need to provide it.
+   */
+  onLogsOpen?: () => void;
 }
 
 /**
@@ -279,6 +284,7 @@ export function AskBarView({
   onMicCancel,
   micState = 'idle',
   micError,
+  onLogsOpen,
 }: AskBarViewProps) {
   /** Ref to the mirror div behind the textarea for command highlighting. */
   const mirrorRef = useRef<HTMLDivElement>(null);
@@ -758,6 +764,35 @@ export function AskBarView({
                   <path
                     d="M4 9a1 1 0 112 0 4 4 0 008 0 1 1 0 112 0 6 6 0 01-5 5.917V17h2a1 1 0 110 2H7a1 1 0 110-2h2v-2.083A6 6 0 014 9z"
                     fill="currentColor"
+                  />
+                </svg>
+              </button>
+            </Tooltip>
+          ) : null}
+
+          {/* Diagnostics — opens the in-app log viewer so the user can see
+              what the ASR / vision / Hermes pipelines actually emit without
+              opening DevTools. */}
+          {onLogsOpen ? (
+            <Tooltip label="Show diagnostics logs">
+              <button
+                type="button"
+                onClick={onLogsOpen}
+                aria-label="Show diagnostics logs"
+                className="shrink-0 w-7 h-7 flex items-center justify-center rounded-lg text-text-secondary hover:text-text-primary hover:bg-white/8 transition-colors duration-150 cursor-pointer"
+              >
+                <svg
+                  width="14"
+                  height="14"
+                  viewBox="0 0 20 20"
+                  fill="none"
+                  xmlns="http://www.w3.org/2000/svg"
+                >
+                  <path
+                    d="M3 4h14M3 8h14M3 12h10M3 16h7"
+                    stroke="currentColor"
+                    strokeWidth="1.6"
+                    strokeLinecap="round"
                   />
                 </svg>
               </button>

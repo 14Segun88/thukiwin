@@ -76,8 +76,38 @@ pub async fn transcribe_audio(
         .decode(audio_base64.as_bytes())
         .map_err(|e| format!("Invalid base64 audio payload: {e}"))?;
 
+    crate::diagnostics::log(
+        "asr",
+        &format!(
+            "received recording: bytes={}, mime={:?}, lang={:?}",
+            bytes.len(),
+            mime_type,
+            language
+        ),
+    );
+
     if bytes.is_empty() {
+        crate::diagnostics::log("asr", "empty recording — refusing to call Groq");
         return Err("Empty audio recording".to_string());
+    }
+    // Reject obviously-too-short clips up front. MediaRecorder always emits a
+    // ~few-hundred-byte container even when nothing was captured; Whisper then
+    // hallucinates a stock phrase (Russian: «продолжение следует», English:
+    // «thanks for watching», etc.) from its training data instead of returning
+    // empty text. 2 KiB is a safe floor that still lets through legitimate
+    // one-word commands (~0.5 s of opus at 32 kbps ≈ 2.5 KiB).
+    if bytes.len() < 2048 {
+        crate::diagnostics::log(
+            "asr",
+            &format!(
+                "recording too short ({} bytes) — likely silence; skipping Groq call",
+                bytes.len()
+            ),
+        );
+        return Ok(TranscriptionResult {
+            text: String::new(),
+            model: DEFAULT_WHISPER_MODEL.to_string(),
+        });
     }
     // Groq accepts up to 25 MB. Reject anything obviously oversized so we
     // don't burn the upload only to be rejected server-side.
@@ -130,24 +160,76 @@ pub async fn transcribe_audio(
         .multipart(form)
         .send()
         .await
-        .map_err(|e| format!("Groq request failed: {e}"))?;
+        .map_err(|e| {
+            crate::diagnostics::log("asr", &format!("Groq request failed: {e}"));
+            format!("Groq request failed: {e}")
+        })?;
 
     let status = response.status();
     if !status.is_success() {
         let body = response.text().await.unwrap_or_default();
+        let snippet: String = body.chars().take(400).collect();
+        crate::diagnostics::log(
+            "asr",
+            &format!("Groq HTTP {} — {}", status.as_u16(), snippet),
+        );
         return Err(format!(
             "Groq returned HTTP {}: {}",
             status.as_u16(),
-            body.chars().take(400).collect::<String>()
+            snippet
         ));
     }
 
     let parsed: GroqTranscriptionResponse = response
         .json()
         .await
-        .map_err(|e| format!("Failed to parse Groq response: {e}"))?;
+        .map_err(|e| {
+            crate::diagnostics::log("asr", &format!("Failed to parse Groq response: {e}"));
+            format!("Failed to parse Groq response: {e}")
+        })?;
 
     let text = parsed.text.trim().to_string();
+    crate::diagnostics::log(
+        "asr",
+        &format!(
+            "Groq returned transcript: len={}, preview={:?}",
+            text.chars().count(),
+            text.chars().take(80).collect::<String>()
+        ),
+    );
+
+    // Whisper hallucination guard: when fed near-silence (typical with cheap
+    // mics or accidental brief clicks on the mic button) the model emits
+    // canonical training-set phrases instead of empty text. Suppress the most
+    // common ones so the UI doesn't append garbage to the user's query.
+    let lower = text.to_lowercase();
+    const HALLUCINATIONS: &[&str] = &[
+        "продолжение следует",
+        "субтитры подогнал",
+        "субтитры сделал",
+        "редактор субтитров",
+        "субтитры от",
+        "корректор",
+        "thanks for watching",
+        "thank you for watching",
+        "subtitles by",
+        "♪",
+    ];
+    let is_hallucination = HALLUCINATIONS.iter().any(|p| lower.contains(p))
+        // Or anything suspiciously short (< 3 chars) that whisper sometimes
+        // emits for silence.
+        || (text.chars().count() < 3 && !text.is_empty());
+    if is_hallucination {
+        crate::diagnostics::log(
+            "asr",
+            &format!("suppressed likely hallucination: {:?}", text),
+        );
+        return Ok(TranscriptionResult {
+            text: String::new(),
+            model: DEFAULT_WHISPER_MODEL.to_string(),
+        });
+    }
+
     Ok(TranscriptionResult {
         text,
         model: DEFAULT_WHISPER_MODEL.to_string(),

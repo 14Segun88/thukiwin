@@ -12,6 +12,7 @@ pub mod commands;
 pub mod config;
 pub mod asr;
 pub mod database;
+pub mod diagnostics;
 pub mod history;
 pub mod images;
 pub mod models;
@@ -826,6 +827,11 @@ pub fn run() {
             // ASR (Groq Whisper) — voice input
             #[cfg(not(coverage))]
             asr::transcribe_audio,
+            // In-app diagnostics buffer (Logs panel)
+            #[cfg(not(coverage))]
+            diagnostics::get_logs,
+            #[cfg(not(coverage))]
+            diagnostics::clear_logs,
             // Agent commands (Windows only)
             #[cfg(all(target_os = "windows", not(coverage)))]
             agent::start_agent_mode,

@@ -33,6 +33,7 @@ import { OnboardingView } from './view/onboarding/index';
 import type { OnboardingStage } from './view/onboarding/index';
 import { HistoryPanel } from './components/HistoryPanel';
 import { ImagePreviewModal } from './components/ImagePreviewModal';
+import { LogsPanel } from './components/LogsPanel';
 import type { AttachedImage } from './types/image';
 import { MAX_IMAGE_SIZE_BYTES } from './types/image';
 import { quote } from './config';
@@ -128,6 +129,8 @@ function App() {
    * but rendered differently based on `isChatMode`).
    */
   const [isHistoryOpen, setIsHistoryOpen] = useState(false);
+  /** Master switch for the in-app Diagnostics panel (Ctrl+Shift+L). */
+  const [isLogsOpen, setIsLogsOpen] = useState(false);
   /**
    * True when the user clicked + while an unsaved conversation is active.
    * Causes the history dropdown to show a SwitchConfirmation prompt instead
@@ -1816,6 +1819,11 @@ function App() {
                   onMicCancel={asr.cancel}
                   micState={asr.state}
                   micError={asr.error}
+                  onLogsOpen={() => setIsLogsOpen((v) => !v)}
+                />
+                <LogsPanel
+                  open={isLogsOpen}
+                  onClose={() => setIsLogsOpen(false)}
                 />
               </div>
 

@@ -641,12 +641,28 @@ pub async fn ask_ollama(
             && agent_provider == "hermes"
             && !model.to_lowercase().contains("vision")
         {
+            crate::diagnostics::log(
+                "vision",
+                &format!(
+                    "auto-upgrading model {} → meta/llama-3.2-90b-vision-instruct (provider=hermes, has_images=true)",
+                    model
+                ),
+            );
             // Hard-coded fallback — matches the vision model exposed by our
             // gateway in providers::default_models. If the user has selected
             // a different vision model explicitly (model name contains
             // "vision"), we respect their choice above.
             "meta/llama-3.2-90b-vision-instruct".to_string()
         } else {
+            if has_images {
+                crate::diagnostics::log(
+                    "vision",
+                    &format!(
+                        "request carries images but no auto-upgrade (provider={}, model={})",
+                        agent_provider, model
+                    ),
+                );
+            }
             model
         };
 

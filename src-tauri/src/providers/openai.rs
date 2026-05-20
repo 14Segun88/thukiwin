@@ -11,6 +11,29 @@ use tokio_util::sync::CancellationToken;
 
 use super::{ProviderChunk, ToolCall};
 
+/// Sniffs the MIME type from the first few decoded bytes of a base64 image
+/// payload. Falls back to `image/jpeg` because `images::save_image` re-encodes
+/// every saved file as JPEG (this is the dominant case).
+///
+/// We decode only the first 16 base64 chars (≈ 12 raw bytes) which is enough
+/// for every common image format and keeps this cheap on the hot path.
+fn detect_image_mime_from_base64(b64: &str) -> &'static str {
+    use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+    // 16 base64 chars decode to exactly 12 bytes.
+    let head: String = b64.chars().take(16).collect();
+    let Ok(bytes) = BASE64.decode(head.as_bytes()) else {
+        return "image/jpeg";
+    };
+    match bytes.as_slice() {
+        [0xFF, 0xD8, 0xFF, ..] => "image/jpeg",
+        [0x89, b'P', b'N', b'G', ..] => "image/png",
+        [b'G', b'I', b'F', b'8', ..] => "image/gif",
+        [b'R', b'I', b'F', b'F', _, _, _, _, b'W', b'E', b'B', b'P', ..] => "image/webp",
+        [0x42, 0x4D, ..] => "image/bmp",
+        _ => "image/jpeg",
+    }
+}
+
 // ─── Request types ────────────────────────────────────────────────────────────
 
 #[derive(Serialize)]
@@ -286,11 +309,28 @@ pub async fn stream_openai_chat(
                     "text": m.content,
                 })];
                 for img in imgs {
+                    // Sniff the real image format from the decoded magic bytes.
+                    // `images.rs::save_image` re-encodes everything as JPEG, but
+                    // older history entries or external integrations may pass
+                    // PNG/WEBP/GIF, and a wrong MIME makes some upstream vision
+                    // gateways (NVIDIA NIM in particular) silently drop the
+                    // image instead of returning a useful error.
+                    let mime = detect_image_mime_from_base64(img);
                     parts.push(serde_json::json!({
                         "type": "image_url",
-                        "image_url": { "url": format!("data:image/png;base64,{}", img) },
+                        "image_url": { "url": format!("data:{};base64,{}", mime, img) },
                     }));
                 }
+                crate::diagnostics::log(
+                    "vision",
+                    &format!(
+                        "outgoing message: images={}, first_mime={}, model_hint=will-use-vision-route",
+                        imgs.len(),
+                        imgs.first()
+                            .map(|s| detect_image_mime_from_base64(s))
+                            .unwrap_or("?"),
+                    ),
+                );
                 Value::Array(parts)
             } else {
                 Value::String(m.content)
