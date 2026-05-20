@@ -6,6 +6,7 @@ import { useState, useEffect } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 
 import { Section, NumberSlider } from '../components';
+import { MicrophoneTester } from '../components/MicrophoneTester';
 import { SaveField } from '../components/SaveField';
 import { configHelp } from '../configHelpers';
 import styles from '../../styles/settings.module.css';
@@ -227,6 +228,16 @@ export function SoundTab({ config, resyncToken, onSaved }: SoundTabProps) {
             <code>console.groq.com/keys</code>. Used by the microphone
             button on the input bar to transcribe with whisper-large-v3.
           </span>
+        </div>
+
+        <div className="mt-4 flex flex-col gap-2">
+          <label
+            className="text-xs font-medium"
+            style={{ color: 'var(--color-text-secondary)' }}
+          >
+            Microphone test
+          </label>
+          <MicrophoneTester />
         </div>
       </Section>
     </>
