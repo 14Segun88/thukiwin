@@ -377,7 +377,7 @@ export function useOllama(
               break;
             }
             case 'Token': {
-              currentContent += event.data;
+              currentContent += event.content;
               setSearchStage(null);
               updateAssistant({ content: currentContent });
               break;
