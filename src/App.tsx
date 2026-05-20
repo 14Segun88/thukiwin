@@ -277,7 +277,43 @@ function App() {
   // Push-to-talk hook. The mic button on the ask bar calls start() on first
   // click and stopAndTranscribe() on second click; the returned transcript is
   // appended to the query field via setQuery in the AskBarView mic handler.
-  const asr = useAsr({ language: 'ru' });
+  //
+  // The user can pin a specific input device in Settings → Sound → Microphone
+  // test → "Use for ThukiWin" button. We persist the deviceId in SQLite under
+  // `mic_device_id` and read it here so getUserMedia routes to the right mic
+  // instead of the Windows "Communications" default (often a muted ghost).
+  const [micDeviceId, setMicDeviceId] = useState<string | undefined>(undefined);
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const settings = await invoke<Record<string, string>>('get_settings');
+        if (cancelled) return;
+        const saved = settings['mic_device_id'];
+        if (saved && saved.length > 0) setMicDeviceId(saved);
+      } catch {
+        // ignored — fall back to Windows default
+      }
+    })();
+    // Re-read when the settings window reports a config update so the user
+    // doesn't need to restart after picking a new device.
+    const unlistenPromise = listen<unknown>('thuki://config-updated', () => {
+      void (async () => {
+        try {
+          const settings = await invoke<Record<string, string>>('get_settings');
+          const saved = settings['mic_device_id'];
+          setMicDeviceId(saved && saved.length > 0 ? saved : undefined);
+        } catch {
+          // ignore
+        }
+      })();
+    });
+    return () => {
+      cancelled = true;
+      void unlistenPromise.then((u) => u());
+    };
+  }, []);
+  const asr = useAsr({ language: 'ru', deviceId: micDeviceId });
 
   const inputRef = useRef<HTMLTextAreaElement>(null);
 

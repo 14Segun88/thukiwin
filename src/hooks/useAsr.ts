@@ -54,6 +54,17 @@ export interface UseAsrReturn {
 interface UseAsrOptions {
   /** ISO-639-1 language hint sent to Whisper. Empty/undefined = autodetect. */
   language?: string;
+  /**
+   * Explicit MediaDevices `deviceId` to record from. Overrides the Windows
+   * default input — set by the user in Settings → Sound → Microphone test.
+   *
+   * Windows default routing is unreliable in WebView2: getUserMedia without
+   * a deviceId often binds to "Communications" device, which can be a
+   * disabled / muted ghost device while the *actual* working mic sits on
+   * the regular "Default" slot. Honouring an explicit deviceId is the only
+   * way to make ThukiWin record from the device the user verified works.
+   */
+  deviceId?: string;
 }
 
 /** Encodes a Blob's bytes as base64 (chunked to avoid call-stack overflow). */
@@ -97,7 +108,7 @@ function pickMime(): string {
 }
 
 export function useAsr(opts: UseAsrOptions = {}): UseAsrReturn {
-  const { language } = opts;
+  const { language, deviceId } = opts;
   const [state, setState] = useState<AsrState>('idle');
   const [error, setError] = useState<string | null>(null);
   /** Reactive copies of the level/elapsed refs so consumers re-render. */
@@ -161,16 +172,46 @@ export function useAsr(opts: UseAsrOptions = {}): UseAsrReturn {
     setError(null);
     setState('requesting');
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        audio: {
-          // Mild DSP — Edge/Chrome ship these on by default but be explicit
-          // so background noise doesn't ruin Whisper accuracy.
-          echoCancellation: true,
-          noiseSuppression: true,
-          autoGainControl: true,
-        },
-      });
+      asrLog(`requesting device: ${deviceId ? deviceId : '(Windows default)'}`);
+      const audioConstraints: MediaTrackConstraints = {
+        // Mild DSP — Edge/Chrome ship these on by default but be explicit
+        // so background noise doesn't ruin Whisper accuracy.
+        echoCancellation: true,
+        noiseSuppression: true,
+        autoGainControl: true,
+      };
+      if (deviceId) {
+        // `exact` so the browser refuses to silently fall back to the
+        // default — we want to know if the saved device disappeared.
+        (audioConstraints as MediaTrackConstraints & {
+          deviceId?: ConstrainDOMString;
+        }).deviceId = { exact: deviceId };
+      }
+      let stream: MediaStream;
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({
+          audio: audioConstraints,
+        });
+      } catch (e) {
+        // If the saved deviceId is invalid (device was unplugged), retry
+        // with the Windows default so the user is not stuck.
+        if (deviceId) {
+          asrLog(
+            `exact deviceId failed (${(e as Error).message}); retrying with default`,
+          );
+          stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        } else {
+          throw e;
+        }
+      }
       streamRef.current = stream;
+      const track = stream.getAudioTracks()[0];
+      if (track) {
+        const s = track.getSettings();
+        asrLog(
+          `track label="${track.label}" deviceId=${s.deviceId ?? '?'} sampleRate=${s.sampleRate ?? '?'}`,
+        );
+      }
       const mimeType = pickMime();
       asrLog(`picked MIME: ${mimeType || '(default)'}`);
       const rec = mimeType
@@ -268,7 +309,7 @@ export function useAsr(opts: UseAsrOptions = {}): UseAsrReturn {
       teardown();
       throw e;
     }
-  }, [teardown]);
+  }, [deviceId, teardown]);
 
   const stopAndTranscribe = useCallback(async (): Promise<string> => {
     const rec = recorderRef.current;

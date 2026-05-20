@@ -18,6 +18,7 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { invoke } from '@tauri-apps/api/core';
 
 interface AudioInput {
   deviceId: string;
@@ -63,6 +64,9 @@ const SELECT: React.CSSProperties = {
 export function MicrophoneTester() {
   const [devices, setDevices] = useState<AudioInput[]>([]);
   const [selected, setSelected] = useState<string>('');
+  /** deviceId currently persisted as ThukiWin's input override. */
+  const [savedDeviceId, setSavedDeviceId] = useState<string>('');
+  const [savedStatus, setSavedStatus] = useState<string | null>(null);
   const [isActive, setIsActive] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [level, setLevel] = useState<number>(0);
@@ -71,6 +75,21 @@ export function MicrophoneTester() {
   const streamRef = useRef<MediaStream | null>(null);
   const ctxRef = useRef<AudioContext | null>(null);
   const rafRef = useRef<number | null>(null);
+
+  // Load any previously-saved deviceId so the dropdown can pre-select it
+  // and the "Use for ThukiWin" button knows whether to render in
+  // "active" state.
+  useEffect(() => {
+    void (async () => {
+      try {
+        const settings = await invoke<Record<string, string>>('get_settings');
+        const id = settings['mic_device_id'];
+        if (id) setSavedDeviceId(id);
+      } catch {
+        // ignored
+      }
+    })();
+  }, []);
 
   const loadDevices = useCallback(async () => {
     try {
@@ -90,11 +109,18 @@ export function MicrophoneTester() {
           label: d.label || `Microphone ${i + 1}`,
         }));
       setDevices(inputs);
-      if (inputs.length > 0 && !selected) setSelected(inputs[0].deviceId);
+      if (inputs.length > 0 && !selected) {
+        // Prefer the saved device on first load so the user can immediately
+        // verify their existing choice. Falls back to first available.
+        const preferred =
+          inputs.find((d) => d.deviceId === savedDeviceId)?.deviceId ??
+          inputs[0].deviceId;
+        setSelected(preferred);
+      }
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     }
-  }, [selected]);
+  }, [selected, savedDeviceId]);
 
   useEffect(() => {
     void loadDevices();
@@ -176,8 +202,34 @@ export function MicrophoneTester() {
     }
   }, [selected, stop]);
 
+  const saveAsDefault = useCallback(async () => {
+    setSavedStatus(null);
+    try {
+      await invoke('set_setting', { key: 'mic_device_id', value: selected });
+      setSavedDeviceId(selected);
+      setSavedStatus('Saved ✓ — ThukiWin will now record from this device.');
+    } catch (e) {
+      setSavedStatus(`Failed to save: ${e instanceof Error ? e.message : e}`);
+    }
+  }, [selected]);
+
+  const clearOverride = useCallback(async () => {
+    setSavedStatus(null);
+    try {
+      await invoke('set_setting', { key: 'mic_device_id', value: '' });
+      setSavedDeviceId('');
+      setSavedStatus(
+        'Cleared — ThukiWin will use the Windows default device again.',
+      );
+    } catch (e) {
+      setSavedStatus(`Failed to clear: ${e instanceof Error ? e.message : e}`);
+    }
+  }, []);
+
   const bars = Array.from({ length: 24 });
   const litCount = Math.min(24, Math.round(Math.sqrt(level) * 24));
+  const isCurrentlySaved =
+    savedDeviceId !== '' && savedDeviceId === selected;
 
   return (
     <div
@@ -287,10 +339,48 @@ export function MicrophoneTester() {
         <div style={{ fontSize: 11, color: COLORS.error }}>{error}</div>
       ) : null}
 
+      <div
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          gap: 6,
+          flexWrap: 'wrap',
+        }}
+      >
+        <button
+          type="button"
+          onClick={saveAsDefault}
+          disabled={!selected || isCurrentlySaved}
+          style={{
+            ...BUTTON,
+            background: isCurrentlySaved ? '#1a3a1f' : '#ff8d5c',
+            color: isCurrentlySaved ? '#90ee90' : '#1a1a1a',
+            borderColor: isCurrentlySaved ? '#34d399' : '#ff8d5c',
+            opacity: !selected || isCurrentlySaved ? 0.85 : 1,
+            cursor: !selected || isCurrentlySaved ? 'default' : 'pointer',
+          }}
+        >
+          {isCurrentlySaved
+            ? '✓ Active for ThukiWin'
+            : 'Use this mic for ThukiWin'}
+        </button>
+        {savedDeviceId ? (
+          <button type="button" onClick={clearOverride} style={BUTTON}>
+            Reset to Windows default
+          </button>
+        ) : null}
+        {savedStatus ? (
+          <span style={{ fontSize: 11, color: COLORS.text }}>
+            {savedStatus}
+          </span>
+        ) : null}
+      </div>
+
       <div style={{ fontSize: 11, color: COLORS.textSecondary }}>
-        ThukiWin records with the <strong>Windows default</strong> input.
-        Whatever device shows a green signal here is the one to set as default
-        in Settings → System → Sound → Input.
+        Press <strong>Use this mic for ThukiWin</strong> after the meter shows a
+        green signal. The voice-input button in the chat will then record from
+        exactly this device, bypassing the Windows "Communications" default
+        that some setups route to a muted ghost.
       </div>
     </div>
   );

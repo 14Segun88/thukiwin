@@ -79,6 +79,44 @@ pub enum StreamChunk {
     Cancelled,
     /// A structured, user-friendly error occurred during processing.
     Error(OllamaError),
+    /// Discard tokens accumulated so far for the in-flight assistant
+    /// message. Emitted when the backend retries silently (e.g. Hermes
+    /// vision refusal → Groq vision fallback) so the user only sees one
+    /// clean response instead of "refusal + retry".
+    ResetCurrentResponse,
+}
+
+/// Heuristic: does this assistant response look like an upstream refusal
+/// rather than a real answer? Used by the vision fallback path to decide
+/// whether to retry the same prompt through Groq.
+///
+/// Keep this strict — false positives would silently re-route legitimate
+/// short answers to Groq and burn the user's quota.
+fn is_refusal(text: &str) -> bool {
+    let trimmed = text.trim().to_lowercase();
+    if trimmed.is_empty() {
+        return true;
+    }
+    // Genuine answers about images are virtually always longer than 200
+    // chars. Refusals are short canned phrases.
+    if trimmed.chars().count() > 200 {
+        return false;
+    }
+    const NEEDLES: &[&str] = &[
+        "i'm not able to provide help",
+        "i am not able to provide help",
+        "i'm unable to help",
+        "i cannot help with this",
+        "i can't help with this",
+        "i'm sorry, but i can't",
+        "i'm sorry, i can't",
+        "i'm to help that", // observed earlier in user logs
+        "i'm sorry, i cannot",
+        "не могу помочь",
+        "извините, я не могу",
+        "я не могу с этим помочь",
+    ];
+    NEEDLES.iter().any(|n| trimmed.contains(n))
 }
 
 /// A single message in the Ollama `/api/chat` conversation format.
@@ -336,16 +374,25 @@ pub fn get_settings(db: State<'_, crate::history::Database>) -> Result<serde_jso
     Ok(serde_json::Value::Object(settings))
 }
 
-/// Sets a single setting in the app_config table.
+/// Sets a single setting in the app_config table. Also emits the
+/// `thuki://config-updated` event so all webviews can refresh their
+/// cached copies — relied on by the main window's mic-device override
+/// (the picker lives in the Settings window).
 #[cfg_attr(coverage_nightly, coverage(off))]
 #[cfg_attr(not(coverage), tauri::command)]
 pub fn set_setting(
+    app: tauri::AppHandle,
     key: String,
     value: String,
     db: State<'_, crate::history::Database>,
 ) -> Result<(), String> {
-    let conn = db.0.lock().map_err(|e: std::sync::PoisonError<_>| e.to_string())?;
-    crate::database::set_config(&conn, &key, &value).map_err(|e| e.to_string())
+    {
+        let conn = db.0.lock().map_err(|e: std::sync::PoisonError<_>| e.to_string())?;
+        crate::database::set_config(&conn, &key, &value).map_err(|e| e.to_string())?;
+    }
+    use tauri::Emitter;
+    let _ = app.emit("thuki://config-updated", ());
+    Ok(())
 }
 
 /// Core streaming logic for Ollama `/api/chat`, separated from the Tauri
@@ -689,7 +736,7 @@ pub async fn ask_ollama(
             &base_url,
             &model,
             &api_key,
-            messages,
+            messages.clone(),
             false, // no computer-use tools in main chat
             &client,
             cancel_token.clone(),
@@ -721,6 +768,80 @@ pub async fn ask_ollama(
                 kind: OllamaErrorKind::Other,
                 message: format!("{} request failed\n{}", agent_provider, e),
             }));
+        } else if has_images && agent_provider == "hermes" && is_refusal(&accumulated) {
+            // Hermes/NIM gateway sometimes refuses vision requests with a
+            // canned phrase like "I'm not able to provide help with this
+            // conversation." instead of describing the image. We treat this
+            // as a soft failure and retry the same request against Groq's
+            // public vision model (uses the user-supplied Groq API key
+            // already saved for Whisper). The user sees one clean answer
+            // even if upstream NIM mood-swung.
+            crate::diagnostics::log(
+                "vision",
+                &format!(
+                    "Hermes returned refusal ({} chars: {:?}). Retrying via Groq vision fallback.",
+                    accumulated.chars().count(),
+                    accumulated.chars().take(80).collect::<String>()
+                ),
+            );
+            let groq_key = {
+                let conn = db
+                    .0
+                    .lock()
+                    .map_err(|e: std::sync::PoisonError<_>| e.to_string())?;
+                crate::database::get_config(&conn, "api_key_groq")
+                    .ok()
+                    .flatten()
+                    .unwrap_or_default()
+            };
+            if groq_key.trim().is_empty() {
+                crate::diagnostics::log(
+                    "vision",
+                    "Groq fallback skipped — no api_key_groq set in Settings → Sound.",
+                );
+            } else {
+                // Reset the previous (refusal) text in the UI so the user
+                // sees only the fallback response, not "refusal + retry".
+                send(StreamChunk::ResetCurrentResponse);
+                accumulated.clear();
+                let fallback_result = crate::providers::openai::stream_openai_chat(
+                    "https://api.groq.com/openai/v1",
+                    // Llama-4 Scout — Groq's vision-capable model.
+                    "meta-llama/llama-4-scout-17b-16e-instruct",
+                    &groq_key,
+                    messages,
+                    false,
+                    &client,
+                    cancel_token.clone(),
+                    |pc| match pc {
+                        crate::providers::ProviderChunk::Token(t) => {
+                            accumulated.push_str(&t);
+                            send(StreamChunk::Token(t));
+                        }
+                        crate::providers::ProviderChunk::ThinkingToken(t) => {
+                            send(StreamChunk::ThinkingToken(t));
+                        }
+                        crate::providers::ProviderChunk::Done => send(StreamChunk::Done),
+                        crate::providers::ProviderChunk::Cancelled => {
+                            send(StreamChunk::Cancelled)
+                        }
+                        crate::providers::ProviderChunk::Error(e) => {
+                            send(StreamChunk::Error(OllamaError {
+                                kind: OllamaErrorKind::Other,
+                                message: format!("Groq vision fallback error\n{e}"),
+                            }));
+                        }
+                        crate::providers::ProviderChunk::ToolCalls(_) => {}
+                    },
+                )
+                .await;
+                if let Err(e) = fallback_result {
+                    send(StreamChunk::Error(OllamaError {
+                        kind: OllamaErrorKind::Other,
+                        message: format!("Groq vision fallback failed\n{e}"),
+                    }));
+                }
+            }
         }
         accumulated
     } else {

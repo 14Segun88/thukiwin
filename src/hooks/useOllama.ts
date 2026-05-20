@@ -49,7 +49,10 @@ export type StreamChunk =
   | { type: 'ThinkingToken'; data: string }
   | { type: 'Done' }
   | { type: 'Cancelled' }
-  | { type: 'Error'; data: { kind: OllamaErrorKind; message: string } };
+  | { type: 'Error'; data: { kind: OllamaErrorKind; message: string } }
+  /** Backend retried silently (e.g. vision refusal → Groq fallback).
+   *  Drop everything accumulated for the in-flight assistant message. */
+  | { type: 'ResetCurrentResponse' };
 
 /** Result payload delivered to callers when a `/search` pipeline turn finishes. */
 export interface SearchOutcome {
@@ -174,6 +177,16 @@ export function useOllama(
               m.id === assistantId ? { ...m, content: currentContent } : m,
             ),
           );
+        } else if (chunk.type === 'ResetCurrentResponse') {
+          // Silent backend retry — wipe the in-flight text so the user
+          // sees only the fresh response.
+          currentContent = '';
+          setMessages((prev) =>
+            prev.map((m) =>
+              m.id === assistantId ? { ...m, content: '' } : m,
+            ),
+          );
+          observersRef.current?.onAssistantInterrupt?.();
         } else if (chunk.type === 'Done') {
           setIsGenerating(false);
           observersRef.current?.onAssistantDone?.();
@@ -364,7 +377,7 @@ export function useOllama(
               break;
             }
             case 'Token': {
-              currentContent += event.content;
+              currentContent += event.data;
               setSearchStage(null);
               updateAssistant({ content: currentContent });
               break;
