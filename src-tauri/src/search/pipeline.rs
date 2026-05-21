@@ -532,6 +532,13 @@ pub(super) fn translate_chunk(chunk: StreamChunk) -> SearchEvent {
         StreamChunk::Done => SearchEvent::Done { metadata: None },
         StreamChunk::Cancelled => SearchEvent::Cancelled,
         StreamChunk::Error(e) => SearchEvent::Error { message: e.message },
+        // ResetCurrentResponse is a main-chat-only signal (vision refusal
+        // fallback). The search pipeline never emits it from its own
+        // downstream provider, so the safe pass-through is to drop it as
+        // an empty token — no observable effect on the search UI.
+        StreamChunk::ResetCurrentResponse => SearchEvent::Token {
+            content: String::new(),
+        },
     }
 }
 
